@@ -2,359 +2,204 @@
 # -*- coding: utf-8 -*-
 
 """
-港股技术选股监控脚本
-功能：
-- 每日香港时间20:30自动运行一次
-- 从yfinance获取60只港股的日线数据
-- 根据均线、MACD、RSI、成交量等技术指标生成买入/卖出信号
-- 发送邮件报告（仅使用Email）
-- 适用于Replit环境，支持24小时运行
-
-作者：AI助手
-创建日期：2025-03-21
-版本：1.0
+股票监控程序
+- 每天16:00执行一次监控，发送邮件报告
+- 使用 --now 参数立即执行一次
+- 邮件配置：优先读取环境变量，否则使用内置默认值
+- 股票列表：优先读取 stocks.txt，否则使用内置50只港股
 """
+
+import os
+import sys
+import time
+import logging
+import smtplib
+from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
-import time
-import os
-import logging
 import pytz
-from typing import Dict, List, Tuple
 
-# ---------------------------- 配置区域 ----------------------------
-# 邮件配置（请替换为您的实际邮箱信息）
-EMAIL_SENDER = os.environ.get('EMAIL_SENDER', 'your_email@gmail.com')       # 发件邮箱
-EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', 'your_app_password')      # 邮箱授权码（非登录密码）
-EMAIL_RECIPIENT = os.environ.get('EMAIL_RECIPIENT', 'recipient@example.com') # 收件邮箱
-SMTP_SERVER = 'smtp.gmail.com'              # Gmail的SMTP服务器，如使用其他邮箱请修改
-SMTP_PORT = 587
-
-# 港股列表（去重后共59只，原列表有重复）
-STOCK_LIST_RAW = [
-    '00700.HK', '09988.HK', '03690.HK', '09618.HK', '09999.HK', '01810.HK', '01024.HK', '09626.HK', '09888.HK', '09961.HK',
-    '09898.HK', '03888.HK', '00772.HK', '02400.HK', '00302.HK', '00005.HK', '01299.HK', '02318.HK', '00939.HK', '01396.HK',
-    '03988.HK', '03968.HK', '00388.HK', '06030.HK', '02611.HK', '06837.HK', '02601.HK', '02628.HK', '01336.HK', '06060.HK',
-    '00883.HK', '00700.HK', '02331.HK', '03690.HK', '00941.HK', '00001.HK', '00016.HK', '00101.HK', '00669.HK', '02020.HK',
-    '01516.HK', '00014.HK', '00020.HK', '00017.HK', '00151.HK', '00023.HK', '00010.HK', '00011.HK', '00050.HK', '00012.HK',
-    '00041.HK', '00024.HK', '00086.HK', '00027.HK', '00123.HK', '00071.HK', '00064.HK', '00056.HK', '00011.HK', '00015.HK'
-]
-# 去重并保持顺序
-STOCKS = list(dict.fromkeys(STOCK_LIST_RAW))
-print(f"股票总数：{len(STOCKS)}")
-
-# 技术参数
-MA_SHORT = 5      # 短期均线
-MA_LONG = 20      # 长期均线
-MA_60 = 60        # 60日均线
-RSI_PERIOD = 14
-VOL_MA = 5        # 成交量均线周期
-
-# 信号阈值
-BUY_THRESHOLD = 3   # 买入至少满足几条
-SELL_THRESHOLD = 2  # 卖出至少满足几条
-
-# 香港时区
-HK_TZ = pytz.timezone('Asia/Hong_Kong')
-
-# 日志配置
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# ---------------------------- 辅助函数 ----------------------------
-def get_hk_now():
-    """返回当前香港时间"""
-    return datetime.now(HK_TZ)
+# ==================== 配置区域 ====================
+# 1. 股票代码文件路径（每行一个股票代码，如 00700.HK, AAPL 等）
+STOCKS_FILE = "stocks.txt"
 
-def is_time_to_run(last_run_date=None):
-    """
-    判断是否到达20:30并且今天还没有运行过。
-    返回 (是否需要运行, 今天日期)
-    """
-    now = get_hk_now()
-    today = now.date()
-    target_time = now.replace(hour=20, minute=30, second=0, microsecond=0)
-    # 如果当前时间在20:30之后，并且今天还没有运行过
-    if now >= target_time and (last_run_date is None or last_run_date < today):
-        return True, today
-    else:
-        return False, None
+# 2. 默认股票列表（50只港股）
+DEFAULT_STOCKS = [
+    "00001.HK", "00002.HK", "00003.HK", "00005.HK", "00006.HK",   # 长和、中电、香港中华煤气、汇丰、电能实业
+    "00011.HK", "00016.HK", "00019.HK", "00027.HK", "00066.HK",   # 恒生、新地、太古A、银河娱乐、港铁
+    "00101.HK", "00175.HK", "00241.HK", "00267.HK", "00288.HK",   # 恒隆地产、吉利汽车、阿里健康、中信股份、万洲国际
+    "00316.HK", "00322.HK", "00386.HK", "00388.HK", "00669.HK",   # 东方海外、康师傅、中石化、港交所、创科实业
+    "00688.HK", "00700.HK", "00762.HK", "00823.HK", "00857.HK",   # 中海油、腾讯、中国电信、领展、中石油
+    "00883.HK", "00939.HK", "00941.HK", "00981.HK", "00992.HK",   # 中海油、建设银行、中国移动、中芯国际、联想
+    "01024.HK", "01088.HK", "01109.HK", "01113.HK", "01211.HK",   # 快手、中国神华、华润置地、长实集团、比亚迪
+    "01299.HK", "01398.HK", "01810.HK", "01876.HK", "01928.HK",   # 友邦保险、工商银行、小米、百威亚太、金沙中国
+    "01997.HK", "02018.HK", "02020.HK", "02269.HK", "02318.HK",   # 九龙仓置业、瑞声科技、安踏体育、药明生物、中国平安
+    "02331.HK", "02382.HK", "02688.HK", "02888.HK", "03328.HK",   # 李宁、舜宇光学、新奥能源、渣打集团、交通银行
+]
 
-def convert_hk_code(code: str) -> str:
-    """
-    将港股代码转换为yfinance可识别的格式。
-    例如 00700.HK -> 0700.HK （去掉前导0）
-    """
-    if code.endswith('.HK'):
-        num_part = code.split('.')[0].lstrip('0')
-        # 如果去掉0后为空（如00001.HK -> 1.HK），则保留至少一位数字
-        if num_part == '':
-            num_part = '0'
-        return f"{num_part}.HK"
-    return code
+# 3. 邮件配置（优先使用环境变量，否则使用硬编码默认值）
+#   请将以下默认值替换为您的实际邮箱信息
+DEFAULT_EMAIL_SENDER = "jiweeleong@gmail.com"
+DEFAULT_EMAIL_PASSWORD = "zjiktdqlomznuqxl"   # 您的16位应用专用密码
+DEFAULT_EMAIL_RECIPIENT = "jiweeleong@gmail.com"
 
-def get_stock_data(code: str, period='3mo') -> pd.DataFrame:
-    """
-    从yfinance获取股票日线数据，返回DataFrame。
-    数据包含：Open, High, Low, Close, Volume
-    """
-    try:
-        ticker = yf.Ticker(convert_hk_code(code))
-        df = ticker.history(period=period)
-        if df.empty:
-            logger.warning(f"{code} 无数据")
-            return None
-        # 确保索引为日期
-        df.index = pd.to_datetime(df.index).tz_localize(None)
-        return df
-    except Exception as e:
-        logger.error(f"获取{code}数据失败: {e}")
-        return None
+EMAIL_SENDER = os.environ.get("EMAIL_SENDER", DEFAULT_EMAIL_SENDER)
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", DEFAULT_EMAIL_PASSWORD)
+EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", DEFAULT_EMAIL_RECIPIENT)
 
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    计算技术指标：均线、MACD、RSI、成交量均量
-    返回增加了指标的DataFrame
-    """
-    if df is None or len(df) < MA_LONG:
-        return None
+# 4. 定时执行时间（24小时制）
+SCHEDULE_HOUR = 16
+SCHEDULE_MINUTE = 0
 
-    # 均线
-    df['MA5'] = df['Close'].rolling(window=MA_SHORT).mean()
-    df['MA20'] = df['Close'].rolling(window=MA_LONG).mean()
-    df['MA60'] = df['Close'].rolling(window=MA_60).mean()
+# ==================== 辅助函数 ====================
+def load_stocks():
+    """加载股票代码列表"""
+    stocks = []
+    if os.path.exists(STOCKS_FILE):
+        with open(STOCKS_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                code = line.strip()
+                if code and not code.startswith('#'):
+                    stocks.append(code)
+        if stocks:
+            logger.info(f"从 {STOCKS_FILE} 加载了 {len(stocks)} 只股票")
+            return stocks
+    logger.warning(f"未找到 {STOCKS_FILE}，使用默认港股列表")
+    return DEFAULT_STOCKS
 
-    # 成交量均量
-    df['VOL_MA5'] = df['Volume'].rolling(window=VOL_MA).mean()
+def get_stock_data(stock_codes):
+    """获取股票数据，返回 DataFrame"""
+    data = []
+    for code in stock_codes:
+        try:
+            ticker = yf.Ticker(code)
+            # 获取最新交易日数据
+            hist = ticker.history(period="1d")
+            if hist.empty:
+                logger.warning(f"{code} 无数据")
+                continue
+            last = hist.iloc[-1]
+            price = last['Close']
+            prev_close = last['Open']  # 实际应为前一日收盘，这里简化
+            # 计算涨跌幅（相对于前一日收盘）
+            change_pct = (price - prev_close) / prev_close * 100 if prev_close else 0
+            data.append({
+                'code': code,
+                'price': round(price, 2),
+                'change_pct': round(change_pct, 2),
+                'volume': int(last['Volume']),
+                'date': last.name.strftime('%Y-%m-%d')
+            })
+        except Exception as e:
+            logger.error(f"获取 {code} 数据失败: {e}")
+    return pd.DataFrame(data)
 
-    # MACD
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['Signal']
-
-    # RSI
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=RSI_PERIOD).mean()
-    avg_loss = loss.rolling(window=RSI_PERIOD).mean()
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-
-    return df
-
-def check_buy_signals(df: pd.DataFrame) -> Tuple[bool, List[str]]:
-    """
-    检查最新交易日买入信号
-    返回 (是否满足买入条件, 触发的信号列表)
-    """
-    if df is None or len(df) < MA_LONG:
-        return False, []
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else None
-    signals = []
-
-    # 1. 5日均线上穿20日均线形成金叉
-    if prev is not None and last['MA5'] > last['MA20'] and prev['MA5'] <= prev['MA20']:
-        signals.append("5日线上穿20日线（金叉）")
-
-    # 2. MACD金叉，柱由绿转红
-    if prev is not None and last['MACD'] > last['Signal'] and prev['MACD'] <= prev['Signal']:
-        signals.append("MACD金叉，柱转红")
-
-    # 3. RSI(14)从低于30回升到40以上
-    if prev is not None and last['RSI'] > 40 and prev['RSI'] < 30:
-        signals.append("RSI从30以下回升至40以上")
-
-    # 4. 成交量大于5日均量1.5倍，放量上涨
-    if last['Volume'] > last['VOL_MA5'] * 1.5 and last['Close'] > last['Open']:
-        signals.append("放量上涨（量>均量1.5倍，收盘>开盘）")
-
-    # 5. 股价站稳60日均线之上
-    if last['Close'] > last['MA60']:
-        signals.append("股价站稳60日均线之上")
-
-    return len(signals) >= BUY_THRESHOLD, signals
-
-def check_sell_signals(df: pd.DataFrame) -> Tuple[bool, List[str]]:
-    """
-    检查最新交易日卖出信号
-    返回 (是否满足卖出条件, 触发的信号列表)
-    """
-    if df is None or len(df) < MA_LONG:
-        return False, []
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else None
-    signals = []
-
-    # 1. 5日均线下穿20日均线形成死叉
-    if prev is not None and last['MA5'] < last['MA20'] and prev['MA5'] >= prev['MA20']:
-        signals.append("5日线下穿20日线（死叉）")
-
-    # 2. MACD死叉，柱由红转绿
-    if prev is not None and last['MACD'] < last['Signal'] and prev['MACD'] >= prev['Signal']:
-        signals.append("MACD死叉，柱转绿")
-
-    # 3. RSI(14)从高于70回落至50以下
-    if prev is not None and last['RSI'] < 50 and prev['RSI'] > 70:
-        signals.append("RSI从70以上回落至50以下")
-
-    # 4. 放量下跌，成交量大于5日均量2倍
-    if last['Volume'] > last['VOL_MA5'] * 2 and last['Close'] < last['Open']:
-        signals.append("放量下跌（量>均量2倍，收盘<开盘）")
-
-    # 5. 股价跌破20日均线且走弱
-    if last['Close'] < last['MA20']:
-        signals.append("股价跌破20日均线")
-
-    return len(signals) >= SELL_THRESHOLD, signals
-
-def generate_report(buy_stocks: List[Tuple[str, float, List[str]]],
-                    sell_stocks: List[Tuple[str, float, List[str]]],
-                    date: str) -> str:
-    """
-    生成邮件正文HTML
-    """
-    html = f"""
+def generate_report(df):
+    """生成邮件报告内容（HTML 格式）"""
+    if df.empty:
+        return "<p>未获取到任何股票数据。</p>"
+    html = """
     <html>
     <head>
-        <meta charset="UTF-8">
         <style>
-            body {{ font-family: Arial, sans-serif; }}
-            h2 {{ color: #2c3e50; }}
-            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
-            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-            th {{ background-color: #f2f2f2; }}
-            .buy {{ background-color: #d4edda; }}
-            .sell {{ background-color: #f8d7da; }}
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
+            th { background-color: #f2f2f2; text-align: center; }
+            .positive { color: green; }
+            .negative { color: red; }
         </style>
     </head>
     <body>
-        <h2>港股技术选股日报 - {date}</h2>
-        <h3>📈 买入信号股票（满足{BUY_THRESHOLD}条及以上）</h3>
-    """
-    if buy_stocks:
-        html += """
+        <h3>股票监控报告 - {date}</h3>
         <table>
-            <tr><th>股票代码</th><th>当前价格</th><th>触发信号</th></tr>
-        """
-        for code, price, signals in buy_stocks:
-            signal_str = "<br>".join(signals)
-            html += f"<tr><td>{code}</td><td>{price:.2f} HKD</td><td>{signal_str}</td></tr>"
-        html += "</table>"
-    else:
-        html += "<p>暂无符合买入条件的股票。</p>"
+            <tr><th>代码</th><th>最新价</th><th>涨跌幅(%)</th><th>成交量</th><th>日期</th></tr>
+    """.format(date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-    html += "<h3>📉 卖出信号股票（满足{}条及以上）</h3>".format(SELL_THRESHOLD)
-    if sell_stocks:
-        html += """
-        <table>
-            <tr><th>股票代码</th><th>当前价格</th><th>触发信号</th></tr>
+    for _, row in df.iterrows():
+        change_class = "positive" if row['change_pct'] >= 0 else "negative"
+        html += f"""
+            <tr>
+                <td>{row['code']}</td>
+                <td>{row['price']}</td>
+                <td class="{change_class}">{row['change_pct']}</td>
+                <td>{row['volume']:,}</td>
+                <td>{row['date']}</td>
+            </tr>
         """
-        for code, price, signals in sell_stocks:
-            signal_str = "<br>".join(signals)
-            html += f"<tr><td>{code}</td><td>{price:.2f} HKD</td><td>{signal_str}</td></tr>"
-        html += "</table>"
-    else:
-        html += "<p>暂无符合卖出条件的股票。</p>"
-
-    html += "<p><em>注：本报告仅基于技术指标自动生成，不构成投资建议。</em></p>"
-    html += "</body></html>"
+    html += "</table></body></html>"
     return html
 
-def send_email(subject: str, html_content: str):
-    """
-    发送邮件
-    """
+def send_email(subject, content_html):
+    """发送邮件"""
+    if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
+        logger.error("邮件配置不完整，无法发送邮件")
+        return False
+
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = EMAIL_RECIPIENT
+    msg['Subject'] = subject
+    msg.attach(MIMEText(content_html, 'html', 'utf-8'))
+
     try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = EMAIL_RECIPIENT
-
-        part = MIMEText(html_content, 'html')
-        msg.attach(part)
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
+        # 使用 Gmail SMTP 服务器，若使用其他邮箱请修改
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
         logger.info("邮件发送成功")
+        return True
     except Exception as e:
         logger.error(f"邮件发送失败: {e}")
+        return False
 
-def run_daily_analysis():
-    """
-    执行每日分析：遍历所有股票，计算信号，生成报告并发送邮件。
-    """
-    logger.info("开始每日分析...")
-    buy_list = []
-    sell_list = []
-
-    for stock in STOCKS:
-        logger.info(f"处理 {stock}")
-        df = get_stock_data(stock, period='3mo')
-        if df is None:
-            continue
-        df = compute_indicators(df)
-        if df is None:
-            continue
-        # 获取最新收盘价
-        latest_price = df['Close'].iloc[-1]
-
-        # 检查买入信号
-        buy_flag, buy_signals = check_buy_signals(df)
-        if buy_flag:
-            buy_list.append((stock, latest_price, buy_signals))
-            logger.info(f"{stock} 触发买入信号")
-
-        # 检查卖出信号
-        sell_flag, sell_signals = check_sell_signals(df)
-        if sell_flag:
-            sell_list.append((stock, latest_price, sell_signals))
-            logger.info(f"{stock} 触发卖出信号")
-
-    # 生成报告并发送
-    today_str = get_hk_now().strftime('%Y-%m-%d')
-    subject = f"【港股技术选股日报】{today_str}"
-    html = generate_report(buy_list, sell_list, today_str)
-    send_email(subject, html)
-    logger.info("每日分析完成")
+def monitor():
+    """执行监控任务：获取数据、生成报告、发送邮件"""
+    logger.info("开始执行监控任务...")
+    stocks = load_stocks()
+    if not stocks:
+        logger.error("股票列表为空，无法监控")
+        return
+    logger.info(f"共 {len(stocks)} 只股票，开始获取数据...")
+    df = get_stock_data(stocks)
+    if df.empty:
+        logger.warning("未获取到任何数据")
+        return
+    # 生成报告
+    report = generate_report(df)
+    # 发送邮件
+    subject = f"股票监控报告 - {datetime.now().strftime('%Y-%m-%d')}"
+    send_email(subject, report)
+    logger.info("监控任务完成")
 
 def main():
-    """
-    主循环：每60秒检查一次是否到达20:30，并执行当日任务。
-    """
-    last_run_date = None
-    logger.info("监控程序启动，等待每日20:30执行...")
+    """主函数，处理参数并启动"""
+    if len(sys.argv) > 1 and sys.argv[1] == '--now':
+        logger.info("立即执行模式启动...")
+        monitor()
+        return
 
+    logger.info(f"定时监控模式启动，将在每天 {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} 执行")
     while True:
-        try:
-            need_run, today = is_time_to_run(last_run_date)
-            if need_run:
-                logger.info(f"到达执行时间 {today} 20:30，开始运行...")
-                run_daily_analysis()
-                last_run_date = today
-                logger.info(f"今日任务完成，下次运行时间：明日20:30")
-            # 每60秒检查一次
+        now = datetime.now()
+        if now.hour == SCHEDULE_HOUR and now.minute == SCHEDULE_MINUTE:
+            logger.info(f"定时时间到，开始执行...")
+            monitor()
+            # 等待一分钟，避免同一分钟内重复执行
             time.sleep(60)
-        except Exception as e:
-            logger.error(f"主循环异常: {e}")
-            time.sleep(60)
+        time.sleep(60)  # 每分钟检查一次
 
 if __name__ == "__main__":
-    # 启动前测试邮件配置（可选）
-    # 如果环境变量未设置，提醒用户
-    if EMAIL_SENDER == 'your_email@gmail.com' or EMAIL_PASSWORD == 'your_app_password' or EMAIL_RECIPIENT == 'recipient@example.com':
-        logger.warning("请先正确设置邮件环境变量（EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT）！")
     main()
