@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-股票监控程序
-- 每天16:00执行一次监控，发送邮件报告
+股票监控程序（港股+马股精选版）
+- 每天18:00执行一次监控，发送邮件报告
 - 使用 --now 参数立即执行一次
-- 邮件配置：优先读取环境变量，否则使用内置默认值
-- 股票列表：优先读取 stocks.txt，否则使用内置50只港股
+- 趋势分析：上升/下跌/盘整，并检测趋势转换
+- 趋势强度（MA5-MA20差距比例）并按实际数值降序排列（上升在前，下跌在后）
+- 包含股票名称，移除成交量列和日期列，趋势转换行高亮
+- 默认监控50只港股 + 50只马股（已验证有效代码）
+- 可通过 stocks.txt 自定义股票列表
 """
 
 import os
@@ -20,8 +23,6 @@ from email.mime.multipart import MIMEMultipart
 
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import pytz
 
 # 配置日志
 logging.basicConfig(
@@ -31,25 +32,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置区域 ====================
-# 1. 股票代码文件路径（每行一个股票代码，如 00700.HK, AAPL 等）
-STOCKS_FILE = "stocks.txt"
+STOCKS_FILE = "stocks.txt"  # 可选，若存在则优先使用
 
-# 2. 默认股票列表（50只港股）
-DEFAULT_STOCKS = [
-    "00001.HK", "00002.HK", "00003.HK", "00005.HK", "00006.HK",   # 长和、中电、香港中华煤气、汇丰、电能实业
-    "00011.HK", "00016.HK", "00019.HK", "00027.HK", "00066.HK",   # 恒生、新地、太古A、银河娱乐、港铁
-    "00101.HK", "00175.HK", "00241.HK", "00267.HK", "00288.HK",   # 恒隆地产、吉利汽车、阿里健康、中信股份、万洲国际
-    "00316.HK", "00322.HK", "00386.HK", "00388.HK", "00669.HK",   # 东方海外、康师傅、中石化、港交所、创科实业
-    "00688.HK", "00700.HK", "00762.HK", "00823.HK", "00857.HK",   # 中海油、腾讯、中国电信、领展、中石油
-    "00883.HK", "00939.HK", "00941.HK", "00981.HK", "00992.HK",   # 中海油、建设银行、中国移动、中芯国际、联想
-    "01024.HK", "01088.HK", "01109.HK", "01113.HK", "01211.HK",   # 快手、中国神华、华润置地、长实集团、比亚迪
-    "01299.HK", "01398.HK", "01810.HK", "01876.HK", "01928.HK",   # 友邦保险、工商银行、小米、百威亚太、金沙中国
-    "01997.HK", "02018.HK", "02020.HK", "02269.HK", "02318.HK",   # 九龙仓置业、瑞声科技、安踏体育、药明生物、中国平安
-    "02331.HK", "02382.HK", "02688.HK", "02888.HK", "03328.HK",   # 李宁、舜宇光学、新奥能源、渣打集团、交通银行
+# 精选港股 50 只（已验证有效）
+HK_STOCKS = [
+    "0001.HK", "0002.HK", "0003.HK", "0005.HK", "0006.HK",
+    "0012.HK", "0016.HK", "0019.HK", "0027.HK", "0066.HK",
+    "0101.HK", "0175.HK", "0241.HK", "0267.HK", "0288.HK",
+    "0316.HK", "0322.HK", "0386.HK", "0388.HK", "0669.HK",
+    "0688.HK", "0700.HK", "0762.HK", "0823.HK", "0857.HK",
+    "0883.HK", "0939.HK", "0941.HK", "0981.HK", "0992.HK",
+    "1024.HK", "1088.HK", "1109.HK", "1113.HK", "1211.HK",
+    "1299.HK", "1398.HK", "1810.HK", "1876.HK", "1928.HK",
+    "1997.HK", "2018.HK", "2020.HK", "2269.HK", "2318.HK",
+    "2331.HK", "2382.HK", "2688.HK", "2888.HK", "3328.HK"
 ]
 
-# 3. 邮件配置（优先使用环境变量，否则使用硬编码默认值）
-#   请将以下默认值替换为您的实际邮箱信息
+# 精选马股 50 只（已验证有效）
+MY_STOCKS = [
+    "1155.KL", "1295.KL", "1023.KL", "5347.KL", "5225.KL",
+    "8869.KL", "5819.KL", "4197.KL", "5211.KL", "6947.KL",
+    "6033.KL", "3816.KL", "1066.KL", "4863.KL", "6012.KL",
+    "6742.KL", "4707.KL", "1082.KL", "1961.KL", "5398.KL",
+    "4677.KL", "2445.KL", "1015.KL", "5079.KL", "6888.KL",
+    "5681.KL", "5249.KL", "2089.KL", "5296.KL", "4065.KL",
+    "7084.KL", "5227.KL", "5878.KL", "3794.KL", "4715.KL",
+    "3182.KL", "5031.KL", "5288.KL", "7277.KL", "3336.KL",
+    "0166.KL", "7204.KL", "5247.KL", "5145.KL", "4162.KL",
+    "5099.KL", "5138.KL", "5140.KL", "5183.KL", "5326.KL"
+]
+
+DEFAULT_STOCKS = HK_STOCKS + MY_STOCKS
+
+# 邮件配置（优先使用环境变量，否则使用硬编码默认值）
 DEFAULT_EMAIL_SENDER = "jiweeleong@gmail.com"
 DEFAULT_EMAIL_PASSWORD = "zjiktdqlomznuqxl"   # 您的16位应用专用密码
 DEFAULT_EMAIL_RECIPIENT = "jiweeleong@gmail.com"
@@ -58,13 +73,12 @@ EMAIL_SENDER = os.environ.get("EMAIL_SENDER", DEFAULT_EMAIL_SENDER)
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", DEFAULT_EMAIL_PASSWORD)
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", DEFAULT_EMAIL_RECIPIENT)
 
-# 4. 定时执行时间（24小时制）
-SCHEDULE_HOUR = 16
+# 定时执行时间（下午6点）
+SCHEDULE_HOUR = 18
 SCHEDULE_MINUTE = 0
 
 # ==================== 辅助函数 ====================
 def load_stocks():
-    """加载股票代码列表"""
     stocks = []
     if os.path.exists(STOCKS_FILE):
         with open(STOCKS_FILE, 'r', encoding='utf-8') as f:
@@ -75,73 +89,136 @@ def load_stocks():
         if stocks:
             logger.info(f"从 {STOCKS_FILE} 加载了 {len(stocks)} 只股票")
             return stocks
-    logger.warning(f"未找到 {STOCKS_FILE}，使用默认港股列表")
+    logger.warning(f"未找到 {STOCKS_FILE}，使用默认港股+马股列表")
     return DEFAULT_STOCKS
 
-def get_stock_data(stock_codes):
-    """获取股票数据，返回 DataFrame"""
+def get_stock_data(stock_codes, period="1mo"):
     data = []
-    for code in stock_codes:
+    total = len(stock_codes)
+    for idx, code in enumerate(stock_codes, 1):
         try:
+            logger.info(f"获取 {code} ({idx}/{total}) ...")
             ticker = yf.Ticker(code)
-            # 获取最新交易日数据
-            hist = ticker.history(period="1d")
+            hist = ticker.history(period=period)
             if hist.empty:
                 logger.warning(f"{code} 无数据")
                 continue
-            last = hist.iloc[-1]
-            price = last['Close']
-            prev_close = last['Open']  # 实际应为前一日收盘，这里简化
-            # 计算涨跌幅（相对于前一日收盘）
-            change_pct = (price - prev_close) / prev_close * 100 if prev_close else 0
+
+            # 获取股票名称
+            try:
+                info = ticker.info
+                name = info.get('longName') or info.get('shortName') or code
+            except Exception:
+                name = code
+
+            hist['MA5'] = hist['Close'].rolling(window=5).mean()
+            hist['MA20'] = hist['Close'].rolling(window=20).mean()
+
+            latest = hist.iloc[-1]
+            ma5 = latest['MA5']
+            ma20 = latest['MA20']
+            if pd.notna(ma5) and pd.notna(ma20):
+                diff_pct = (ma5 - ma20) / ma20 * 100
+                if ma5 > ma20:
+                    trend = '上升'
+                elif ma5 < ma20:
+                    trend = '下跌'
+                else:
+                    trend = '盘整'
+            else:
+                diff_pct = None
+                trend = '数据不足'
+
+            # 趋势转换
+            if len(hist) >= 2:
+                prev = hist.iloc[-2]
+                prev_ma5 = prev['MA5']
+                prev_ma20 = prev['MA20']
+                if pd.notna(prev_ma5) and pd.notna(prev_ma20):
+                    prev_trend = '上升' if prev_ma5 > prev_ma20 else ('下跌' if prev_ma5 < prev_ma20 else '盘整')
+                else:
+                    prev_trend = '数据不足'
+                trend_change = (trend != prev_trend) and (trend != '数据不足') and (prev_trend != '数据不足')
+                prev_close = prev['Close']
+            else:
+                trend_change = False
+                prev_close = latest['Open'] if 'Open' in latest else latest['Close']
+
+            change_pct = (latest['Close'] - prev_close) / prev_close * 100 if prev_close else 0
+
             data.append({
                 'code': code,
-                'price': round(price, 2),
+                'name': name,
+                'price': round(latest['Close'], 2),
                 'change_pct': round(change_pct, 2),
-                'volume': int(last['Volume']),
-                'date': last.name.strftime('%Y-%m-%d')
+                'trend': trend,
+                'trend_change': '是' if trend_change else '否',
+                'ma_diff_pct': round(diff_pct, 2) if diff_pct is not None else 'N/A'
             })
         except Exception as e:
             logger.error(f"获取 {code} 数据失败: {e}")
     return pd.DataFrame(data)
 
 def generate_report(df):
-    """生成邮件报告内容（HTML 格式）"""
     if df.empty:
         return "<p>未获取到任何股票数据。</p>"
-    html = """
+
+    html = f"""
     <html>
     <head>
         <style>
-            table { border-collapse: collapse; width: 100%; }
-            th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
-            th { background-color: #f2f2f2; text-align: center; }
-            .positive { color: green; }
-            .negative { color: red; }
+            table {{ border-collapse: collapse; width: 100%; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: right; }}
+            th {{ background-color: #f2f2f2; text-align: center; }}
+            .positive {{ color: green; }}
+            .negative {{ color: red; }}
+            .trend-change {{ background-color: #ffe6e6; }}
+            .trend-up {{ color: green; font-weight: bold; }}
+            .trend-down {{ color: red; font-weight: bold; }}
+            .trend-consolidation {{ color: gray; }}
+            .strength-positive {{ color: green; }}
+            .strength-negative {{ color: red; }}
         </style>
     </head>
     <body>
-        <h3>股票监控报告 - {date}</h3>
-        <table>
-            <tr><th>代码</th><th>最新价</th><th>涨跌幅(%)</th><th>成交量</th><th>日期</th></tr>
-    """.format(date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        <h3>股票监控报告 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</h3>
+        <p>说明：趋势基于5日均线与20日均线的关系（上升：MA5>MA20，下跌：MA5<MA20，盘整：其他）。趋势强度 = (MA5-MA20)/MA20×100%。趋势转换表示今日趋势与昨日不同。</p>
+        <p><strong>股票已按趋势强度实际数值降序排列（上升趋势在前，下跌趋势在后）。</strong></p>
+         <table>
+             <tr>
+                <th>代码</th><th>股票名称</th><th>最新价</th><th>涨跌幅(%)</th><th>当前趋势</th><th>趋势强度(%)</th><th>趋势转换</th>
+             </tr>
+    """
 
     for _, row in df.iterrows():
         change_class = "positive" if row['change_pct'] >= 0 else "negative"
+        trend_class = {
+            "上升": "trend-up",
+            "下跌": "trend-down",
+            "盘整": "trend-consolidation",
+            "数据不足": ""
+        }.get(row['trend'], "")
+        strength_val = row['ma_diff_pct']
+        strength_class = ""
+        if isinstance(strength_val, (int, float)):
+            strength_class = "strength-positive" if strength_val > 0 else ("strength-negative" if strength_val < 0 else "")
+        row_class = "trend-change" if row['trend_change'] == "是" else ""
+
         html += f"""
-            <tr>
+            <tr class="{row_class}">
                 <td>{row['code']}</td>
+                <td style="text-align:left">{row['name']}</td>
                 <td>{row['price']}</td>
                 <td class="{change_class}">{row['change_pct']}</td>
-                <td>{row['volume']:,}</td>
-                <td>{row['date']}</td>
+                <td class="{trend_class}">{row['trend']}</td>
+                <td class="{strength_class}">{strength_val}</td>
+                <td>{row['trend_change']}</td>
             </tr>
         """
-    html += "</table></body></html>"
+    html += " </table></body></html>"
     return html
 
 def send_email(subject, content_html):
-    """发送邮件"""
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
         logger.error("邮件配置不完整，无法发送邮件")
         return False
@@ -153,7 +230,6 @@ def send_email(subject, content_html):
     msg.attach(MIMEText(content_html, 'html', 'utf-8'))
 
     try:
-        # 使用 Gmail SMTP 服务器，若使用其他邮箱请修改
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -166,7 +242,6 @@ def send_email(subject, content_html):
         return False
 
 def monitor():
-    """执行监控任务：获取数据、生成报告、发送邮件"""
     logger.info("开始执行监控任务...")
     stocks = load_stocks()
     if not stocks:
@@ -177,15 +252,18 @@ def monitor():
     if df.empty:
         logger.warning("未获取到任何数据")
         return
-    # 生成报告
+
+    # 按趋势强度实际数值降序排列（正值在上，负值在下）
+    df['sort_key'] = pd.to_numeric(df['ma_diff_pct'], errors='coerce')
+    df = df.sort_values(by='sort_key', ascending=False, na_position='last')
+    df = df.drop(columns=['sort_key'])
+
     report = generate_report(df)
-    # 发送邮件
     subject = f"股票监控报告 - {datetime.now().strftime('%Y-%m-%d')}"
     send_email(subject, report)
     logger.info("监控任务完成")
 
 def main():
-    """主函数，处理参数并启动"""
     if len(sys.argv) > 1 and sys.argv[1] == '--now':
         logger.info("立即执行模式启动...")
         monitor()
@@ -197,9 +275,8 @@ def main():
         if now.hour == SCHEDULE_HOUR and now.minute == SCHEDULE_MINUTE:
             logger.info(f"定时时间到，开始执行...")
             monitor()
-            # 等待一分钟，避免同一分钟内重复执行
             time.sleep(60)
-        time.sleep(60)  # 每分钟检查一次
+        time.sleep(60)
 
 if __name__ == "__main__":
     main()
