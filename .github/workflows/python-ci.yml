@@ -1,7 +1,7 @@
 name: Stock Monitor CI
 
 on:
-  # 1. 手动触发（支持选择是否立即执行）
+  # 手动触发
   workflow_dispatch:
     inputs:
       run_now:
@@ -13,30 +13,32 @@ on:
           - 'true'
           - 'false'
 
-  # 2. 代码推送到 main 分支时自动触发
+  # 代码推送触发
   push:
     branches: [ main ]
 
-  # 3. 定时触发（每天 18:00 执行，对应 UTC 10:00）
+  # 定时触发（UTC 10:00 = 北京时间 18:00）
   schedule:
-    - cron: '0 10 * * *'   # UTC 10:00 = 北京时间 18:00
+    - cron: '0 10 * * *'
 
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
-    # 添加环境变量全局配置（可选，也可在步骤中单独配置）
     env:
-  EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-  EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-  EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-  SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-  SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      # 引用 Gmail 相关 Secrets
+      EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      # 解决 Node.js 警告
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -44,36 +46,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 优化依赖安装：优先使用 requirements.txt，兼容手动指定
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install yfinance pandas numpy pytz requests
-          fi
+          pip install yfinance pandas numpy pytz requests
 
       - name: Run stock monitor
         run: |
-          # 处理手动触发、定时触发、推送触发的不同逻辑
+          # 处理不同触发方式的逻辑
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # 手动触发：根据用户选择决定是否加 --now
             if [ "${{ github.event.inputs.run_now }}" = "true" ]; then
               python main.py --now
             else
               python main.py
             fi
           else
-            # 定时/推送触发：默认立即执行
             python main.py --now
           fi
-        # 步骤级环境变量（如果需要覆盖全局，或仅在此步骤生效）
         env:
-          # 重复声明确保变量生效（双重保障）
+          # 重复声明确保变量生效
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          API_KEY: ${{ secrets.API_KEY }}
-          NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
-          # 可选：强制使用 Node.js 24 避免警告
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
