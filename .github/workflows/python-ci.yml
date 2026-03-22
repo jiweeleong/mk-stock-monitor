@@ -35,7 +35,7 @@ jobs:
 
       # 运行主程序（使用环境变量传入敏感信息）
       - name: Run stock monitor
-        run: python main.py
+        run: python main.py --now
         env:
           # 从 GitHub Secrets 中读取密钥，在脚本中用 os.getenv("API_KEY") 获取
           API_KEY: ${{ secrets.STOCK_API_KEY }}
