@@ -26,16 +26,11 @@ jobs:
     runs-on: ubuntu-latest
     # 添加环境变量全局配置（可选，也可在步骤中单独配置）
     env:
-      # 邮件基础配置（根据你的脚本实际使用的变量名调整）
-      EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-      EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-      # 补充邮件发送必需的SMTP配置（通用配置，根据你的邮箱服务商调整）
-      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT }}
-      # 补充日志中缺失的其他变量
-      API_KEY: ${{ secrets.API_KEY }}
-      NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
+  EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+  EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+  EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+  SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+  SMTP_PORT: ${{ secrets.SMTP_PORT }}
 
     steps:
       - name: Checkout repository
