@@ -1,14 +1,17 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 from datetime import datetime, time
 import smtplib
 from email.mime.text import MIMEText
 import numpy as np
+import time
 
 # ====================== 配置区 ======================
-INITIAL_CAPITAL = 20000               # 初始资金（马币）
-POSITION_LIMIT = 0.05                 # 单只仓位≤5%
+API_KEY = "346PQPUMN005B74Q"          # 你的 Alpha Vantage 密钥（马股用）
+INITIAL_CAPITAL = 20000
+POSITION_LIMIT = 0.05
 RSI_PERIOD = 14
 MA_PERIOD = 20
 STOP_LOSS = 0.08
@@ -16,14 +19,14 @@ TAKE_PROFIT = 0.15
 
 # 邮件配置（必须替换为真实信息！）
 EMAIL_CONFIG = {
-    "sender": "你的邮箱@gmail.com",         # 改为你的Gmail
-    "password": "你的Gmail授权码",          # 改为应用专用密码
-    "receiver": "接收邮箱@example.com",     # 改为接收日报的邮箱
+    "sender": "你的邮箱@gmail.com",
+    "password": "你的Gmail授权码",
+    "receiver": "接收邮箱@example.com",
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587
 }
 
-# ====================== 股票池：每个市场20只 ======================
+# ====================== 股票池 ======================
 STOCK_POOL = {
     "🇺🇸 美股": [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
@@ -52,21 +55,72 @@ STOCK_POOL = {
     ]
 }
 
-# ====================== 工具函数 ======================
-def get_stock_data(symbol):
-    """使用yfinance获取股票数据，计算技术指标"""
+# ====================== 数据获取函数 ======================
+def get_stock_data_alpha_vantage(symbol):
+    """使用 Alpha Vantage 获取马股数据（带限流处理）"""
+    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}&apikey={API_KEY}&outputsize=compact"
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="3mo")  # 最近3个月
-        if df.empty:
-            st.warning(f"⚠️ {symbol}: 无数据，可能代码无效或非交易时间")
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+
+        if "Time Series (Daily)" not in data:
+            if "Note" in data:
+                st.warning(f"{symbol}: {data['Note']}")
+            else:
+                st.warning(f"{symbol}: 无数据返回")
             return None
 
+        df = pd.DataFrame(data["Time Series (Daily)"]).T
+        df = df.rename(columns={
+            "1. open": "Open", "2. high": "High", "3. low": "Low",
+            "4. close": "Close", "5. volume": "Volume"
+        })
+        df = df.astype({col: float for col in ["Open", "High", "Low", "Close", "Volume"]})
+        df = df.sort_index().tail(90)
+
         if len(df) < MA_PERIOD + RSI_PERIOD:
-            st.warning(f"⚠️ {symbol}: 数据不足 {len(df)} 天，需至少 {MA_PERIOD+RSI_PERIOD} 天")
             return None
 
         # 计算技术指标
+        df["MA20"] = df["Close"].rolling(MA_PERIOD).mean()
+        delta = df["Close"].diff()
+        gain = delta.where(delta > 0, 0).rolling(RSI_PERIOD).mean()
+        loss = -delta.where(delta < 0, 0).rolling(RSI_PERIOD).mean()
+        rs = gain / loss.replace(0, 1e-8)
+        df["RSI"] = 100 - (100 / (1 + rs))
+        df["Vol_MA20"] = df["Volume"].rolling(MA_PERIOD).mean()
+        df["10d_Change"] = (df["Close"] / df["Close"].shift(10).replace(0, 1e-8) - 1) * 100
+
+        return df.iloc[-1]
+
+    except requests.exceptions.Timeout:
+        st.warning(f"{symbol}: 请求超时")
+        return None
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 429:
+            st.warning(f"API调用频率过高，暂停60秒")
+            time.sleep(60)
+        else:
+            st.warning(f"{symbol}: HTTP错误 {e}")
+        return None
+    except Exception as e:
+        st.warning(f"{symbol}: 未知错误 {e}")
+        return None
+
+def get_stock_data_yfinance(symbol):
+    """使用 yfinance 获取非马股数据"""
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="3mo")
+        if df.empty:
+            st.warning(f"⚠️ {symbol}: 无数据")
+            return None
+
+        if len(df) < MA_PERIOD + RSI_PERIOD:
+            st.warning(f"⚠️ {symbol}: 数据不足 {len(df)} 天")
+            return None
+
         df["MA20"] = df["Close"].rolling(MA_PERIOD).mean()
         delta = df["Close"].diff()
         gain = delta.where(delta > 0, 0).rolling(RSI_PERIOD).mean()
@@ -82,8 +136,14 @@ def get_stock_data(symbol):
         st.warning(f"❌ {symbol}: 异常 - {str(e)}")
         return None
 
+def get_stock_data(symbol, market):
+    """根据市场选择数据源"""
+    if market == "🇲🇾 马股":
+        return get_stock_data_alpha_vantage(symbol)
+    else:
+        return get_stock_data_yfinance(symbol)
+
 def generate_signal(row):
-    """根据最新数据生成交易信号"""
     if row is None or pd.isna(row["MA20"]) or pd.isna(row["RSI"]):
         return "无数据"
     long_cond = (row["Close"] > row["MA20"] and 30 < row["RSI"] < 70 and
@@ -92,7 +152,6 @@ def generate_signal(row):
     return "🟢 进场信号" if long_cond else "🔴 出场信号" if short_cond else "⚪ 观望"
 
 def send_report(report_content):
-    """发送邮件日报（需配置真实邮箱）"""
     if "你的邮箱" in EMAIL_CONFIG["sender"] or "授权码" in EMAIL_CONFIG["password"]:
         st.error("❌ 请先在代码中配置正确的邮箱和授权码！")
         return
@@ -118,10 +177,9 @@ def send_report(report_content):
 st.set_page_config(page_title="全球股市监控面板", page_icon="📈", layout="wide")
 st.title("📈 全球股市实时监控（80只核心龙头）")
 st.markdown("""
-✅ **使用 yfinance 免费数据源**，无需 API Key，无速率限制，实时获取全球股票数据。
+✅ **混合数据源**：美股/港股/A股使用 yfinance（免费），马股使用 Alpha Vantage（API Key已配置）。
 """)
 
-# 侧边栏控制
 with st.sidebar:
     st.header("控制面板")
     force_refresh = st.button("🔄 强制刷新全部数据")
@@ -129,10 +187,8 @@ with st.sidebar:
     st.markdown("---")
     st.info(f"**当前标的数**: {sum(len(v) for v in STOCK_POOL.values())} 只")
 
-# 缓存装饰器，TTL=600秒（10分钟）
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_data():
-    """获取所有股票数据"""
     all_results = {}
     total = sum(len(v) for v in STOCK_POOL.values())
     progress_bar = st.progress(0, text="正在获取数据...")
@@ -143,7 +199,7 @@ def fetch_all_data():
         market_data = []
         for symbol in symbols:
             status_text.text(f"正在处理 {market} - {symbol}...")
-            data = get_stock_data(symbol)
+            data = get_stock_data(symbol, market)
             if data is not None:
                 signal = generate_signal(data)
                 market_data.append({
@@ -165,14 +221,18 @@ def fetch_all_data():
                 })
             idx += 1
             progress_bar.progress(idx / total)
-            # yfinance 无严格限制，无需强制 sleep，但为保险可取消注释
-            # time.sleep(0.5)
+            # 控制请求频率（Alpha Vantage 限流）
+            if market == "🇲🇾 马股":
+                time.sleep(12)  # 每分钟5次
+            # yfinance 无需等待，但可留一点缓冲
+            else:
+                time.sleep(0.5)
+
         all_results[market] = market_data
     progress_bar.empty()
     status_text.empty()
     return all_results
 
-# 获取数据（强制刷新时清除缓存）
 if force_refresh:
     st.cache_data.clear()
     st.success("缓存已清除，开始重新获取所有数据...")
@@ -184,7 +244,6 @@ else:
 for market, records in data_dict.items():
     if records:
         df = pd.DataFrame(records)
-        # 定义高亮函数
         def highlight_signal(s):
             if s == "🟢 进场信号":
                 return "background-color: #d4edda; color: #155724"
@@ -193,16 +252,12 @@ for market, records in data_dict.items():
             else:
                 return ""
 
-        # 应用样式（使用 map 替代已弃用的 applymap）
         styled_df = df.style.map(highlight_signal, subset=["信号"])
-
-        # 显示数据表（使用 width='stretch' 替代已弃用的 use_container_width）
         st.subheader(market)
         st.dataframe(styled_df, width='stretch', hide_index=True)
     else:
         st.warning(f"{market} 无数据")
 
-# 日报发送逻辑
 if send_now:
     with st.spinner("正在生成日报并发送..."):
         report = f"=== 全球市场日报 {datetime.now().strftime('%Y-%m-%d')} ===\n"
@@ -214,4 +269,4 @@ if send_now:
         send_report(report)
 
 st.divider()
-st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据源：yfinance（免费） | 实时数据，无速率限制")
+st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据源：yfinance + Alpha Vantage | 马股数据每分钟限5次请求")
