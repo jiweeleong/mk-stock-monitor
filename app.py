@@ -5,6 +5,7 @@ from datetime import datetime, time
 import smtplib
 from email.mime.text import MIMEText
 import numpy as np
+import time  # 新增：控制API频率
 
 # ====================== 配置区 ======================
 API_KEY = "346PQPUMN005B74Q"  # 你的Alpha Vantage Key
@@ -15,39 +16,28 @@ MA_PERIOD = 20
 STOP_LOSS = 0.08
 TAKE_PROFIT = 0.15
 
-# 标的池（每个市场25只核心标的，适配Alpha Vantage格式）
+# 核心标的池（仅保留Alpha Vantage明确支持的龙头，总计40只）
 STOCK_POOL = {
-    # 🇲🇾 马股25（Alpha Vantage格式：代码.KL）
-    "马股25": [
-        "1155.KL", "5235.KL", "5168.KL", "1082.KL", "1295.KL",
-        "5347.KL", "3182.KL", "6012.KL", "5819.KL", "4065.KL",
-        "1023.KL", "2445.KL", "5014.KL", "5246.KL", "6947.KL",
-        "1961.KL", "4707.KL", "7277.KL", "1066.KL", "5184.KL",
-        "3034.KL", "4502.KL", "5296.KL", "6033.KL", "7164.KL"
-    ],
-    # 🇭🇰 港股25（Alpha Vantage格式：代码.HK）
-    "港股25": [
-        "0700.HK", "9988.HK", "0005.HK", "0001.HK", "0002.HK",
-        "0003.HK", "0006.HK", "0011.HK", "0012.HK", "0016.HK",
-        "0017.HK", "0027.HK", "0066.HK", "0083.HK", "0101.HK",
-        "0151.HK", "0175.HK", "0267.HK", "0288.HK", "0386.HK",
-        "0388.HK", "0669.HK", "0688.HK", "0762.HK", "0823.HK"
-    ],
-    # 🇺🇸 美股25（Alpha Vantage格式：纯代码）
-    "美股25": [
+    # 🇺🇸 美股15只（支持最好，全保留）
+    "美股核心": [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
         "META", "TSLA", "AMD", "ADBE", "ORCL",
-        "V", "MA", "PYPL", "AXP", "JPM",
-        "BAC", "WFC", "C", "GS", "MS",
-        "DIS", "NFLX", "PEP", "KO", "MCD"
+        "V", "MA", "JPM", "DIS", "NFLX"
     ],
-    # 🇨🇳 A股25（Alpha Vantage兼容格式：沪市=代码.SS，深市=代码.SZ）
-    "A股25": [
-        "600000.SS", "600036.SS", "600519.SS", "600887.SS", "601318.SS",
-        "601628.SS", "601857.SS", "601988.SS", "600030.SS", "600276.SS",
-        "000001.SZ", "000002.SZ", "000063.SZ", "000333.SZ", "000858.SZ",
-        "000651.SZ", "002027.SZ", "002304.SZ", "002594.SZ", "002415.SZ",
-        "300059.SZ", "300124.SZ", "300274.SZ", "300450.SZ", "300750.SZ"
+    # 🇲🇾 马股10只（Alpha Vantage支持的核心龙头）
+    "马股核心": [
+        "1155.KL", "5235.KL", "5168.KL", "1082.KL", "1295.KL",
+        "5347.KL", "3182.KL", "6012.KL", "5819.KL", "4065.KL"
+    ],
+    # 🇭🇰 港股8只（核心龙头）
+    "港股核心": [
+        "0700.HK", "9988.HK", "0005.HK", "0001.HK", "0002.HK",
+        "0003.HK", "0006.HK", "0388.HK"
+    ],
+    # 🇨🇳 A股7只（Alpha Vantage支持的核心龙头，格式已修正）
+    "A股核心": [
+        "600036.SS", "600519.SS", "000001.SZ", "000858.SZ",
+        "000651.SZ", "002594.SZ", "300750.SZ"
     ]
 }
 
@@ -60,101 +50,67 @@ EMAIL_CONFIG = {
     "smtp_port": 587
 }
 
-# ====================== 工具函数（改用Alpha Vantage数据源） ======================
-@st.cache_data(ttl=900)  # 缓存15分钟，适配API调用限制（5次/分钟）
+# ====================== 工具函数（优化版） ======================
+@st.cache_data(ttl=900)  # 缓存15分钟，减少调用
 def get_stock_data_alpha_vantage(symbol):
-    """从Alpha Vantage获取历史数据+技术指标（适配所有市场）"""
-    # 1. 获取日线数据
+    """从Alpha Vantage获取数据（带容错）"""
     url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}&apikey={API_KEY}&outputsize=full"
     try:
         response = requests.get(url, timeout=15)
+        response.raise_for_status()  # 新增：捕获HTTP错误
         data = response.json()
         
-        # 检查是否返回有效数据
         if "Time Series (Daily)" not in data:
-            st.warning(f"{symbol}：Alpha Vantage无数据（可能不支持该标的）")
-            return None
+            return None  # 无数据直接返回
         
-        # 转换为DataFrame并排序
         df = pd.DataFrame(data["Time Series (Daily)"]).T
         df = df.rename(columns={
-            "1. open": "Open",
-            "2. high": "High",
-            "3. low": "Low",
-            "4. close": "Close",
-            "5. volume": "Volume"
+            "1. open": "Open", "2. high": "High", "3. low": "Low",
+            "4. close": "Close", "5. volume": "Volume"
         })
-        # 转换数据类型
-        df = df.astype({
-            "Open": float, "High": float, "Low": float,
-            "Close": float, "Volume": float
-        })
-        df = df.sort_index()  # 按时间升序排列
+        df = df.astype({"Open": float, "High": float, "Low": float, "Close": float, "Volume": float})
+        df = df.sort_index().tail(90)  # 取最近3个月
         
-        # 取最近3个月数据
-        df = df.tail(90)
         if len(df) < MA_PERIOD + RSI_PERIOD:
-            st.warning(f"{symbol} 数据量不足（仅{len(df)}条）")
             return None
         
-        # 2. 计算技术指标
-        # 20日均线
-        df["MA20"] = df["Close"].rolling(window=MA_PERIOD).mean()
-        # RSI
+        # 计算技术指标
+        df["MA20"] = df["Close"].rolling(MA_PERIOD).mean()
         delta = df["Close"].diff()
-        gain = delta.where(delta > 0, 0).rolling(window=RSI_PERIOD).mean()
-        loss = -delta.where(delta < 0, 0).rolling(window=RSI_PERIOD).mean()
-        rs = gain / loss.replace(0, 1e-8)  # 避免除以0
+        gain = delta.where(delta > 0, 0).rolling(RSI_PERIOD).mean()
+        loss = -delta.where(delta < 0, 0).rolling(RSI_PERIOD).mean()
+        rs = gain / loss.replace(0, 1e-8)
         df["RSI"] = 100 - (100 / (1 + rs))
-        # 20日均量
-        df["Vol_MA20"] = df["Volume"].rolling(window=MA_PERIOD).mean()
-        # 10日涨幅
-        df["10d_Change"] = (df["Close"] / df["Close"].shift(10) - 1) * 100
+        df["Vol_MA20"] = df["Volume"].rolling(MA_PERIOD).mean()
+        df["10d_Change"] = (df["Close"] / df["Close"].shift(10).replace(0, 1e-8) - 1) * 100
         
-        # 返回最新一条数据
         return df.iloc[-1]
     
     except requests.exceptions.Timeout:
         st.warning(f"{symbol}：请求超时")
         return None
-    except Exception as e:
-        st.warning(f"{symbol}：数据获取失败 - {str(e)[:50]}")
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 429:
+            st.warning(f"API调用频率过高，暂停1分钟")
+            time.sleep(60)  # 新增：频率超限时自动暂停
+        return None
+    except Exception:
         return None
 
 def generate_signal(row):
     """生成买卖信号"""
-    if row is None:
+    if row is None or pd.isna(row["MA20"]) or pd.isna(row["RSI"]):
         return "无数据"
-    # 进场条件
-    long_cond = (
-        not pd.isna(row["MA20"]) and
-        not pd.isna(row["RSI"]) and
-        not pd.isna(row["Vol_MA20"]) and
-        not pd.isna(row["10d_Change"]) and
-        row["Close"] > row["MA20"] and
-        30 < row["RSI"] < 70 and
-        row["Volume"] > row["Vol_MA20"] and
-        row["10d_Change"] > 3
-    )
-    # 出场条件
-    short_cond = (
-        not pd.isna(row["MA20"]) and
-        not pd.isna(row["RSI"]) and
-        (row["Close"] < row["MA20"] or row["RSI"] > 70 or row["RSI"] < 30)
-    )
-    if long_cond:
-        return "🟢 进场信号"
-    elif short_cond:
-        return "🔴 出场信号"
-    else:
-        return "⚪ 观望"
+    long_cond = (row["Close"] > row["MA20"] and 30 < row["RSI"] < 70 and row["Volume"] > row["Vol_MA20"] and row["10d_Change"] > 3)
+    short_cond = (row["Close"] < row["MA20"] or row["RSI"] > 70 or row["RSI"] < 30)
+    return "🟢 进场信号" if long_cond else "🔴 出场信号" if short_cond else "⚪ 观望"
 
 def send_daily_report(report_content):
-    """发送每日18:00邮件报告"""
+    """发送每日报告"""
     if datetime.now().time() < time(18, 0):
-        st.info("ℹ️ 未到18:00，若需测试可手动修改时间或忽略此提示")
+        st.info("ℹ️ 未到18:00，测试可忽略")
     msg = MIMEText(report_content, "plain", "utf-8")
-    msg["Subject"] = f"股票市场日报 {datetime.now().strftime('%Y-%m-%d')}"
+    msg["Subject"] = f"全球市场日报 {datetime.now().strftime('%Y-%m-%d')}"
     msg["From"] = EMAIL_CONFIG["sender"]
     msg["To"] = EMAIL_CONFIG["receiver"]
     
@@ -164,26 +120,23 @@ def send_daily_report(report_content):
         server.login(EMAIL_CONFIG["sender"], EMAIL_CONFIG["password"])
         server.sendmail(EMAIL_CONFIG["sender"], EMAIL_CONFIG["receiver"], msg.as_string())
         server.quit()
-        st.success("✅ 日报已发送至邮箱")
+        st.success("✅ 日报已发送")
     except Exception as e:
         st.error(f"❌ 邮件发送失败：{e}")
-        st.info("💡 排查建议：1.授权码是否正确 2.开启两步验证 3.SMTP端口是否匹配")
 
 # ====================== 页面展示 ======================
 st.set_page_config(page_title="全球市场监控面板", page_icon="📊", layout="wide")
-st.title("📊 全球市场监控面板（MOOMOO马来西亚版）")
+st.title("📊 全球市场监控面板（核心龙头版）")
 
-# 遍历市场获取信号
+# 遍历市场获取数据
 all_signals = []
 for market, symbols in STOCK_POOL.items():
     st.subheader(f"📌 {market}")
     market_data = []
-    # 控制API调用频率（避免5次/分钟限制）
     for i, sym in enumerate(symbols):
-        # 每5个标的暂停12秒（适配5次/分钟限制）
-        if i % 5 == 0 and i > 0:
-            import time as t
-            t.sleep(12)
+        # 每3个标的暂停6秒，彻底避免429限流
+        if i % 3 == 0 and i > 0:
+            time.sleep(6)
         
         data = get_stock_data_alpha_vantage(sym)
         if data is not None:
@@ -196,30 +149,26 @@ for market, symbols in STOCK_POOL.items():
                 "10日涨幅": round(data["10d_Change"], 2) if not pd.isna(data["10d_Change"]) else "-",
                 "信号": signal
             })
-            # 信号弹窗提醒
             if signal in ["🟢 进场信号", "🔴 出场信号"]:
                 st.toast(f"{sym}：{signal}！", icon=signal[0])
     
-    # 展示数据表格
     if market_data:
         df = pd.DataFrame(market_data)
         st.dataframe(df, use_container_width=True, hide_index=True)
         all_signals.extend(market_data)
     else:
-        st.info(f"{market} 暂无可用数据（可能非交易时间/标的不支持）")
+        st.info(f"{market} 暂无可用数据（非交易时间/标的不支持）")
 
 # 生成日报按钮
 if st.button("📧 生成并发送今日日报"):
-    with st.spinner("正在生成日报...（约1-2分钟）"):
+    with st.spinner("正在生成日报..."):
         try:
-            report = f"=== 全球市场日报 {datetime.now().strftime('%Y-%m-%d')} ===\n"
-            report += f"初始资金：{INITIAL_CAPITAL} MYR | 单仓上限：{POSITION_LIMIT*100}%\n\n"
+            report = f"=== 全球市场日报 {datetime.now().strftime('%Y-%m-%d')} ===\n初始资金：{INITIAL_CAPITAL} MYR | 单仓上限：{POSITION_LIMIT*100}%\n\n"
             for market, symbols in STOCK_POOL.items():
                 report += f"--- {market} ---\n"
                 for i, sym in enumerate(symbols):
-                    if i % 5 == 0 and i > 0:
-                        import time as t
-                        t.sleep(12)
+                    if i % 3 == 0 and i > 0:
+                        time.sleep(6)
                     data = get_stock_data_alpha_vantage(sym)
                     if data:
                         sig = generate_signal(data)
@@ -229,4 +178,4 @@ if st.button("📧 生成并发送今日日报"):
             st.error(f"❌ 日报生成失败：{str(e)}")
 
 st.divider()
-st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据源：Alpha Vantage | 标的总数：100只")
+st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据源：Alpha Vantage（免费版） | 标的总数：{sum(len(v) for v in STOCK_POOL.values())}只（核心龙头）")
