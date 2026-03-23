@@ -1,4 +1,4 @@
-# 原有依赖
+# 核心依赖
 yfinance==0.2.38
 pandas==2.1.4
 numpy==1.26.4
@@ -7,4 +7,5 @@ streamlit==1.32.0
 matplotlib==3.7.5
 seaborn==0.13.2
 pillow==9.5.0
-akshare==1.18.44
+# Alpha Vantage 必需
+requests==2.31.0
