@@ -56,14 +56,14 @@ STOCK_POOL = {
 def get_stock_data(symbol):
     """使用yfinance获取股票数据，计算技术指标"""
     try:
-        # 下载最近90天数据（足够计算指标）
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period="3mo")  # 3个月数据
+        df = ticker.history(period="3mo")  # 最近3个月
         if df.empty:
+            st.warning(f"⚠️ {symbol}: 无数据，可能代码无效或非交易时间")
             return None
 
-        # 确保有足够数据
         if len(df) < MA_PERIOD + RSI_PERIOD:
+            st.warning(f"⚠️ {symbol}: 数据不足 {len(df)} 天，需至少 {MA_PERIOD+RSI_PERIOD} 天")
             return None
 
         # 计算技术指标
@@ -76,12 +76,10 @@ def get_stock_data(symbol):
         df["Vol_MA20"] = df["Volume"].rolling(MA_PERIOD).mean()
         df["10d_Change"] = (df["Close"] / df["Close"].shift(10).replace(0, 1e-8) - 1) * 100
 
-        # 返回最新一行数据
-        latest = df.iloc[-1]
-        return latest
+        return df.iloc[-1]
 
     except Exception as e:
-        st.warning(f"{symbol}: 获取失败 - {str(e)}")
+        st.warning(f"❌ {symbol}: 异常 - {str(e)}")
         return None
 
 def generate_signal(row):
@@ -167,8 +165,8 @@ def fetch_all_data():
                 })
             idx += 1
             progress_bar.progress(idx / total)
-            # yfinance 无严格限制，无需 sleep，但为避免请求过快可稍加延时（可选）
-            # time.sleep(0.5)  # 如果网络不稳定可取消注释
+            # yfinance 无严格限制，无需强制 sleep，但为保险可取消注释
+            # time.sleep(0.5)
         all_results[market] = market_data
     progress_bar.empty()
     status_text.empty()
@@ -186,7 +184,7 @@ else:
 for market, records in data_dict.items():
     if records:
         df = pd.DataFrame(records)
-        # 添加交易信号的高亮色
+        # 定义高亮函数
         def highlight_signal(s):
             if s == "🟢 进场信号":
                 return "background-color: #d4edda; color: #155724"
@@ -194,16 +192,19 @@ for market, records in data_dict.items():
                 return "background-color: #f8d7da; color: #721c24"
             else:
                 return ""
+
+        # 应用样式（使用 map 替代已弃用的 applymap）
+        styled_df = df.style.map(highlight_signal, subset=["信号"])
+
+        # 显示数据表（使用 width='stretch' 替代已弃用的 use_container_width）
         st.subheader(market)
-        styled_df = df.style.applymap(highlight_signal, subset=["信号"])
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        st.dataframe(styled_df, width='stretch', hide_index=True)
     else:
         st.warning(f"{market} 无数据")
 
 # 日报发送逻辑
 if send_now:
     with st.spinner("正在生成日报并发送..."):
-        # 生成报告文本
         report = f"=== 全球市场日报 {datetime.now().strftime('%Y-%m-%d')} ===\n"
         report += f"初始资金：{INITIAL_CAPITAL} MYR | 单仓上限：{POSITION_LIMIT*100}%\n\n"
         for market, records in data_dict.items():
