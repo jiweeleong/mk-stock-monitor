@@ -1,8 +1,7 @@
-yfinance
-pandas
-numpy
-pytz
-streamlit==1.32.0
+yfinance==0.2.38
+pandas==2.1.4
 numpy==1.26.4
+pytz==2023.4
+streamlit==1.32.0
 matplotlib==3.8.4
 seaborn==0.13.2
