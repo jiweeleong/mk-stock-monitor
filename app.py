@@ -1,78 +1,58 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import requests
-import time
+from datetime import datetime
 
-# ---------------------- 页面基础设置 ----------------------
-st.set_page_config(
-    page_title="我的股票监控面板",  # 页面标题
-    page_icon="📈",  # 图标（可选）
-    layout="wide"  # 宽屏布局
-)
+# 设置页面标题
+st.title("我的股票监控面板")
 
-# ---------------------- 侧边栏配置 ----------------------
-st.sidebar.title("📊 股票监控设置")
-# 示例：让用户输入要监控的股票代码
-stock_codes = st.sidebar.text_input(
-    "输入要监控的股票代码（逗号分隔）",
-    value="600000,000001,300059"  # 默认值
-)
-# 示例：监控频率选择
-check_frequency = st.sidebar.selectbox(
-    "监控频率",
-    options=["实时", "5分钟", "30分钟", "1小时"],
-    index=1
-)
+# --- 1. 定义要监控的股票代码（示例：A股/港股/美股）---
+# A股需要加 .SH 或 .SZ 后缀，港股加 .HK，美股直接代码
+stock_list = {
+    "600000.SH": "浦发银行",
+    "000001.SZ": "平安银行",
+    "300059.SZ": "东方财富",
+    "0700.HK": "腾讯控股",  # 港股示例
+    "AAPL": "苹果公司"      # 美股示例
+}
 
-# ---------------------- 核心股票监控逻辑 ----------------------
-def get_stock_data(codes):
-    """
-    替换成你自己的股票数据获取逻辑
-    这里是示例，返回模拟数据
-    """
-    # 拆分股票代码
-    code_list = [code.strip() for code in codes.split(",") if code.strip()]
-    
-    # 模拟股票数据（你需要替换成真实的接口调用）
+# --- 2. 拉取实时数据 ---
+@st.cache_data(ttl=60)  # 缓存1分钟，避免频繁请求
+def get_real_time_stock_data(stock_list):
     data = []
-    for code in code_list:
-        data.append({
-            "股票代码": code,
-            "当前价格": round(10 + (hash(code) % 100) / 10, 2),  # 模拟价格
-            "涨跌幅(%)": round((hash(code) % 20 - 10) / 10, 2),  # 模拟涨跌幅
-            "成交量": f"{hash(code) % 1000}万手",
-            "更新时间": time.strftime("%Y-%m-%d %H:%M:%S")
-        })
-    
+    for code, name in stock_list.items():
+        ticker = yf.Ticker(code)
+        # 获取最新1天的行情数据（实时/近一天）
+        hist = ticker.history(period="1d", interval="1m")
+        if not hist.empty:
+            latest = hist.iloc[-1]
+            prev_close = ticker.info.get("previousClose", latest["Close"])
+            change_pct = (latest["Close"] - prev_close) / prev_close * 100
+            volume = latest["Volume"] / 10000  # 转换为万手
+            data.append({
+                "股票代码": code,
+                "股票名称": name,
+                "当前价格": round(latest["Close"], 2),
+                "涨跌幅(%)": round(change_pct, 2),
+                "成交量(万手)": round(volume, 2),
+                "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
     return pd.DataFrame(data)
 
-# ---------------------- 主页面展示 ----------------------
-st.title("📈 我的股票监控面板")
-st.markdown("---")  # 分隔线
+# --- 3. 展示数据 ---
+st.subheader("实时股票数据")
+df = get_real_time_stock_data(stock_list)
+st.dataframe(df, use_container_width=True)
 
-# 获取并展示股票数据
-if stock_codes:
-    with st.spinner("正在获取股票数据..."):
-        stock_df = get_stock_data(stock_codes)
-        
-        # 展示数据表格
-        st.subheader("实时股票数据")
-        st.dataframe(
-            stock_df,
-            use_container_width=True,  # 自适应宽度
-            hide_index=True  # 隐藏索引列
-        )
-        
-        # 高亮显示涨跌幅异常的股票（示例）
-        st.subheader("⚠️ 异动提醒")
-        abnormal_stocks = stock_df[(stock_df["涨跌幅(%)"] > 5) | (stock_df["涨跌幅(%)"] < -5)]
-        if not abnormal_stocks.empty:
-            st.error("发现涨跌幅超过5%的股票：")
-            st.dataframe(abnormal_stocks, use_container_width=True, hide_index=True)
-        else:
-            st.success("暂无异常波动股票")
+# --- 4. 异动提醒 ---
+st.subheader("异动提醒")
+threshold = 2.0  # 自定义涨跌幅阈值（±2%）
+abnormal = df[(abs(df["涨跌幅(%)"]) > threshold)]
+if abnormal.empty:
+    st.success("暂无异常波动股票")
 else:
-    st.warning("请在侧边栏输入要监控的股票代码！")
+    st.warning("以下股票波动异常：")
+    st.dataframe(abnormal, use_container_width=True)
 
-# 显示最后更新时间
-st.markdown(f"> 最后更新时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
+# --- 5. 最后更新时间 ---
+st.caption(f"最后更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
