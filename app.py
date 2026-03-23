@@ -1,79 +1,71 @@
 import streamlit as st
 import pandas as pd
-import requests
+import yfinance as yf
 from datetime import datetime, time
 import smtplib
 from email.mime.text import MIMEText
 import numpy as np
-import time  # 新增：控制API频率
 
 # ====================== 配置区 ======================
-API_KEY = "346PQPUMN005B74Q"  # 你的Alpha Vantage Key
-INITIAL_CAPITAL = 20000  # 初始资金（马币）
-POSITION_LIMIT = 0.05    # 单只仓位≤5%
+INITIAL_CAPITAL = 20000               # 初始资金（马币）
+POSITION_LIMIT = 0.05                 # 单只仓位≤5%
 RSI_PERIOD = 14
 MA_PERIOD = 20
 STOP_LOSS = 0.08
 TAKE_PROFIT = 0.15
 
-# 核心标的池（仅保留Alpha Vantage明确支持的龙头，总计40只）
-STOCK_POOL = {
-    # 🇺🇸 美股15只（支持最好，全保留）
-    "美股核心": [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-        "META", "TSLA", "AMD", "ADBE", "ORCL",
-        "V", "MA", "JPM", "DIS", "NFLX"
-    ],
-    # 🇲🇾 马股10只（Alpha Vantage支持的核心龙头）
-    "马股核心": [
-        "1155.KL", "5235.KL", "5168.KL", "1082.KL", "1295.KL",
-        "5347.KL", "3182.KL", "6012.KL", "5819.KL", "4065.KL"
-    ],
-    # 🇭🇰 港股8只（核心龙头）
-    "港股核心": [
-        "0700.HK", "9988.HK", "0005.HK", "0001.HK", "0002.HK",
-        "0003.HK", "0006.HK", "0388.HK"
-    ],
-    # 🇨🇳 A股7只（Alpha Vantage支持的核心龙头，格式已修正）
-    "A股核心": [
-        "600036.SS", "600519.SS", "000001.SZ", "000858.SZ",
-        "000651.SZ", "002594.SZ", "300750.SZ"
-    ]
-}
-
-# 邮件配置（替换为你的真实信息！）
+# 邮件配置（必须替换为真实信息！）
 EMAIL_CONFIG = {
-    "sender": "你的邮箱@gmail.com",
-    "password": "你的Gmail授权码",  # 应用专用密码
-    "receiver": "你的接收邮箱@xxx.com",
+    "sender": "你的邮箱@gmail.com",         # 改为你的Gmail
+    "password": "你的Gmail授权码",          # 改为应用专用密码
+    "receiver": "接收邮箱@example.com",     # 改为接收日报的邮箱
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587
 }
 
-# ====================== 工具函数（优化版） ======================
-@st.cache_data(ttl=900)  # 缓存15分钟，减少调用
-def get_stock_data_alpha_vantage(symbol):
-    """从Alpha Vantage获取数据（带容错）"""
-    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}&apikey={API_KEY}&outputsize=full"
+# ====================== 股票池：每个市场20只 ======================
+STOCK_POOL = {
+    "🇺🇸 美股": [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
+        "META", "TSLA", "AMD", "ADBE", "ORCL",
+        "V", "MA", "JPM", "DIS", "NFLX",
+        "INTC", "CSCO", "PEP", "KO", "WMT"
+    ],
+    "🇲🇾 马股": [
+        "1155.KL", "5235.KL", "5168.KL", "1082.KL", "1295.KL",
+        "5347.KL", "3182.KL", "6012.KL", "5819.KL", "4065.KL",
+        "4162.KL", "6947.KL", "7084.KL", "7113.KL", "7251.KL",
+        "7285.KL", "7293.KL", "7315.KL", "7363.KL", "7412.KL"
+    ],
+    "🇭🇰 港股": [
+        "0700.HK", "9988.HK", "0005.HK", "0001.HK", "0002.HK",
+        "0003.HK", "0006.HK", "0388.HK", "0939.HK", "1398.HK",
+        "2318.HK", "2628.HK", "3988.HK", "1299.HK", "0011.HK",
+        "0012.HK", "0016.HK", "0019.HK", "0027.HK", "0066.HK"
+    ],
+    "🇨🇳 A股": [
+        "600036.SS", "600519.SS", "000001.SZ", "000858.SZ",
+        "000651.SZ", "002594.SZ", "300750.SZ", "600900.SS",
+        "601318.SS", "601398.SS", "601288.SS", "601988.SS",
+        "601328.SS", "600030.SS", "600016.SS", "600276.SS",
+        "600309.SS", "600436.SS", "600519.SS", "601888.SS"
+    ]
+}
+
+# ====================== 工具函数 ======================
+def get_stock_data(symbol):
+    """使用yfinance获取股票数据，计算技术指标"""
     try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()  # 新增：捕获HTTP错误
-        data = response.json()
-        
-        if "Time Series (Daily)" not in data:
-            return None  # 无数据直接返回
-        
-        df = pd.DataFrame(data["Time Series (Daily)"]).T
-        df = df.rename(columns={
-            "1. open": "Open", "2. high": "High", "3. low": "Low",
-            "4. close": "Close", "5. volume": "Volume"
-        })
-        df = df.astype({"Open": float, "High": float, "Low": float, "Close": float, "Volume": float})
-        df = df.sort_index().tail(90)  # 取最近3个月
-        
+        # 下载最近90天数据（足够计算指标）
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="3mo")  # 3个月数据
+        if df.empty:
+            return None
+
+        # 确保有足够数据
         if len(df) < MA_PERIOD + RSI_PERIOD:
             return None
-        
+
         # 计算技术指标
         df["MA20"] = df["Close"].rolling(MA_PERIOD).mean()
         delta = df["Close"].diff()
@@ -83,99 +75,142 @@ def get_stock_data_alpha_vantage(symbol):
         df["RSI"] = 100 - (100 / (1 + rs))
         df["Vol_MA20"] = df["Volume"].rolling(MA_PERIOD).mean()
         df["10d_Change"] = (df["Close"] / df["Close"].shift(10).replace(0, 1e-8) - 1) * 100
-        
-        return df.iloc[-1]
-    
-    except requests.exceptions.Timeout:
-        st.warning(f"{symbol}：请求超时")
-        return None
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 429:
-            st.warning(f"API调用频率过高，暂停1分钟")
-            time.sleep(60)  # 新增：频率超限时自动暂停
-        return None
-    except Exception:
+
+        # 返回最新一行数据
+        latest = df.iloc[-1]
+        return latest
+
+    except Exception as e:
+        st.warning(f"{symbol}: 获取失败 - {str(e)}")
         return None
 
 def generate_signal(row):
-    """生成买卖信号"""
+    """根据最新数据生成交易信号"""
     if row is None or pd.isna(row["MA20"]) or pd.isna(row["RSI"]):
         return "无数据"
-    long_cond = (row["Close"] > row["MA20"] and 30 < row["RSI"] < 70 and row["Volume"] > row["Vol_MA20"] and row["10d_Change"] > 3)
+    long_cond = (row["Close"] > row["MA20"] and 30 < row["RSI"] < 70 and
+                 row["Volume"] > row["Vol_MA20"] and row["10d_Change"] > 3)
     short_cond = (row["Close"] < row["MA20"] or row["RSI"] > 70 or row["RSI"] < 30)
     return "🟢 进场信号" if long_cond else "🔴 出场信号" if short_cond else "⚪ 观望"
 
-def send_daily_report(report_content):
-    """发送每日报告"""
-    if datetime.now().time() < time(18, 0):
-        st.info("ℹ️ 未到18:00，测试可忽略")
+def send_report(report_content):
+    """发送邮件日报（需配置真实邮箱）"""
+    if "你的邮箱" in EMAIL_CONFIG["sender"] or "授权码" in EMAIL_CONFIG["password"]:
+        st.error("❌ 请先在代码中配置正确的邮箱和授权码！")
+        return
+
     msg = MIMEText(report_content, "plain", "utf-8")
     msg["Subject"] = f"全球市场日报 {datetime.now().strftime('%Y-%m-%d')}"
     msg["From"] = EMAIL_CONFIG["sender"]
     msg["To"] = EMAIL_CONFIG["receiver"]
-    
+
     try:
         server = smtplib.SMTP(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"])
         server.starttls()
         server.login(EMAIL_CONFIG["sender"], EMAIL_CONFIG["password"])
         server.sendmail(EMAIL_CONFIG["sender"], EMAIL_CONFIG["receiver"], msg.as_string())
         server.quit()
-        st.success("✅ 日报已发送")
+        st.success("✅ 日报发送成功")
+    except smtplib.SMTPAuthenticationError:
+        st.error("❌ 邮件认证失败，请检查邮箱地址和授权码")
     except Exception as e:
-        st.error(f"❌ 邮件发送失败：{e}")
+        st.error(f"❌ 邮件发送失败: {e}")
 
-# ====================== 页面展示 ======================
-st.set_page_config(page_title="全球市场监控面板", page_icon="📊", layout="wide")
-st.title("📊 全球市场监控面板（核心龙头版）")
+# ====================== 页面布局 ======================
+st.set_page_config(page_title="全球股市监控面板", page_icon="📈", layout="wide")
+st.title("📈 全球股市实时监控（80只核心龙头）")
+st.markdown("""
+✅ **使用 yfinance 免费数据源**，无需 API Key，无速率限制，实时获取全球股票数据。
+""")
 
-# 遍历市场获取数据
-all_signals = []
-for market, symbols in STOCK_POOL.items():
-    st.subheader(f"📌 {market}")
-    market_data = []
-    for i, sym in enumerate(symbols):
-        # 每3个标的暂停6秒，彻底避免429限流
-        if i % 3 == 0 and i > 0:
-            time.sleep(6)
-        
-        data = get_stock_data_alpha_vantage(sym)
-        if data is not None:
-            signal = generate_signal(data)
-            market_data.append({
-                "代码": sym,
-                "当前价": round(data["Close"], 2),
-                "MA20": round(data["MA20"], 2) if not pd.isna(data["MA20"]) else "-",
-                "RSI": round(data["RSI"], 2) if not pd.isna(data["RSI"]) else "-",
-                "10日涨幅": round(data["10d_Change"], 2) if not pd.isna(data["10d_Change"]) else "-",
-                "信号": signal
-            })
-            if signal in ["🟢 进场信号", "🔴 出场信号"]:
-                st.toast(f"{sym}：{signal}！", icon=signal[0])
-    
-    if market_data:
-        df = pd.DataFrame(market_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        all_signals.extend(market_data)
+# 侧边栏控制
+with st.sidebar:
+    st.header("控制面板")
+    force_refresh = st.button("🔄 强制刷新全部数据")
+    send_now = st.button("📧 立即发送今日日报")
+    st.markdown("---")
+    st.info(f"**当前标的数**: {sum(len(v) for v in STOCK_POOL.values())} 只")
+
+# 缓存装饰器，TTL=600秒（10分钟）
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_data():
+    """获取所有股票数据"""
+    all_results = {}
+    total = sum(len(v) for v in STOCK_POOL.values())
+    progress_bar = st.progress(0, text="正在获取数据...")
+    status_text = st.empty()
+
+    idx = 0
+    for market, symbols in STOCK_POOL.items():
+        market_data = []
+        for symbol in symbols:
+            status_text.text(f"正在处理 {market} - {symbol}...")
+            data = get_stock_data(symbol)
+            if data is not None:
+                signal = generate_signal(data)
+                market_data.append({
+                    "代码": symbol,
+                    "当前价": round(data["Close"], 2),
+                    "MA20": round(data["MA20"], 2) if not pd.isna(data["MA20"]) else "-",
+                    "RSI": round(data["RSI"], 2) if not pd.isna(data["RSI"]) else "-",
+                    "10日涨幅%": round(data["10d_Change"], 2) if not pd.isna(data["10d_Change"]) else "-",
+                    "信号": signal
+                })
+            else:
+                market_data.append({
+                    "代码": symbol,
+                    "当前价": "-",
+                    "MA20": "-",
+                    "RSI": "-",
+                    "10日涨幅%": "-",
+                    "信号": "获取失败"
+                })
+            idx += 1
+            progress_bar.progress(idx / total)
+            # yfinance 无严格限制，无需 sleep，但为避免请求过快可稍加延时（可选）
+            # time.sleep(0.5)  # 如果网络不稳定可取消注释
+        all_results[market] = market_data
+    progress_bar.empty()
+    status_text.empty()
+    return all_results
+
+# 获取数据（强制刷新时清除缓存）
+if force_refresh:
+    st.cache_data.clear()
+    st.success("缓存已清除，开始重新获取所有数据...")
+    data_dict = fetch_all_data()
+else:
+    data_dict = fetch_all_data()
+
+# 展示数据
+for market, records in data_dict.items():
+    if records:
+        df = pd.DataFrame(records)
+        # 添加交易信号的高亮色
+        def highlight_signal(s):
+            if s == "🟢 进场信号":
+                return "background-color: #d4edda; color: #155724"
+            elif s == "🔴 出场信号":
+                return "background-color: #f8d7da; color: #721c24"
+            else:
+                return ""
+        st.subheader(market)
+        styled_df = df.style.applymap(highlight_signal, subset=["信号"])
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.info(f"{market} 暂无可用数据（非交易时间/标的不支持）")
+        st.warning(f"{market} 无数据")
 
-# 生成日报按钮
-if st.button("📧 生成并发送今日日报"):
-    with st.spinner("正在生成日报..."):
-        try:
-            report = f"=== 全球市场日报 {datetime.now().strftime('%Y-%m-%d')} ===\n初始资金：{INITIAL_CAPITAL} MYR | 单仓上限：{POSITION_LIMIT*100}%\n\n"
-            for market, symbols in STOCK_POOL.items():
-                report += f"--- {market} ---\n"
-                for i, sym in enumerate(symbols):
-                    if i % 3 == 0 and i > 0:
-                        time.sleep(6)
-                    data = get_stock_data_alpha_vantage(sym)
-                    if data:
-                        sig = generate_signal(data)
-                        report += f"{sym}: 现价{data['Close']:.2f} | {sig}\n"
-            send_daily_report(report)
-        except Exception as e:
-            st.error(f"❌ 日报生成失败：{str(e)}")
+# 日报发送逻辑
+if send_now:
+    with st.spinner("正在生成日报并发送..."):
+        # 生成报告文本
+        report = f"=== 全球市场日报 {datetime.now().strftime('%Y-%m-%d')} ===\n"
+        report += f"初始资金：{INITIAL_CAPITAL} MYR | 单仓上限：{POSITION_LIMIT*100}%\n\n"
+        for market, records in data_dict.items():
+            report += f"--- {market} ---\n"
+            for r in records:
+                report += f"{r['代码']}: 现价{r['当前价']} | {r['信号']}\n"
+        send_report(report)
 
 st.divider()
-st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据源：Alpha Vantage（免费版） | 标的总数：{sum(len(v) for v in STOCK_POOL.values())}只（核心龙头）")
+st.caption(f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据源：yfinance（免费） | 实时数据，无速率限制")
