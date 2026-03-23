@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
+import akshare as ak  # 新增这一行
 
 # 设置页面标题
 st.title("我的股票监控面板")
