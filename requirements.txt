@@ -1,7 +1,10 @@
+# 核心依赖（选兼容Python 3.10的稳定版本）
 yfinance==0.2.38
-pandas==2.1.4
-numpy==1.26.4
+pandas==2.1.4          # 避开3.0+版本，兼容所有库
+numpy==1.26.4          # 固定版本，避免自动升级到2.x
 pytz==2023.4
 streamlit==1.32.0
-matplotlib==3.8.4
+matplotlib==3.7.5      # 降低matplotlib版本，避免依赖高版本Pillow
 seaborn==0.13.2
+# 手动指定Pillow版本（解决zlib编译问题）
+pillow==9.5.0          # 9.x版本无需编译，直接用预编译包
