@@ -8,3 +8,4 @@ matplotlib==3.7.5      # 降低matplotlib版本，避免依赖高版本Pillow
 seaborn==0.13.2
 # 手动指定Pillow版本（解决zlib编译问题）
 pillow==9.5.0          # 9.x版本无需编译，直接用预编译包
+akshare==1.10.0
