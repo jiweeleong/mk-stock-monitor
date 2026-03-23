@@ -1,0 +1,11 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit 缓存
+.streamlit/
+.cache/
+
+# 环境变量
+.env
